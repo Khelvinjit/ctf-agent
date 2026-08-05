@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.7
+# CAPABILITIES is a comma-separated manifest supplied by SandboxPlanner.
+ARG SANDBOX_CAPABILITIES=base
+ARG SANDBOX_REVISION=unknown
+FROM ubuntu:24.04
+
+ARG SANDBOX_CAPABILITIES
+ARG SANDBOX_REVISION
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Start with a small, safe-to-reuse base and add packages only when the manifest
+# asks for their capability. Runtime networking is disabled by SandboxManager.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -eux; \
+    packages="bash ca-certificates coreutils file jq python3 tar unzip xxd"; \
+    has() { case ",${SANDBOX_CAPABILITIES}," in *",$1,"*) return 0;; *) return 1;; esac; }; \
+    if has web; then packages="$packages curl python3-requests"; fi; \
+    if has crypto; then packages="$packages python3-gmpy2 python3-pip"; fi; \
+    if has forensics; then packages="$packages binwalk foremost libimage-exiftool-perl tshark"; fi; \
+    if has reverse; then packages="$packages binutils gdb radare2"; fi; \
+    if has pwn; then packages="$packages build-essential python3-pip python3-dev"; fi; \
+    if has stego; then packages="$packages ruby-full steghide"; fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends $packages; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    has() { case ",${SANDBOX_CAPABILITIES}," in *",$1,"*) return 0;; *) return 1;; esac; }; \
+    if has crypto; then python3 -m pip install --break-system-packages --no-cache-dir pycryptodome; fi; \
+    if has pwn; then python3 -m pip install --break-system-packages --no-cache-dir pwntools ROPgadget; fi; \
+    if has stego; then gem install zsteg --no-document; rm -rf /usr/local/lib/ruby/gems/*/cache; fi
+
+RUN useradd --create-home --shell /bin/bash solver && mkdir /materials
+WORKDIR /tmp
+LABEL org.opencontainers.image.title="ctf-sandbox" \
+      org.opencontainers.image.revision="${SANDBOX_REVISION}" \
+      org.opencontainers.image.capabilities="${SANDBOX_CAPABILITIES}"
+CMD ["sleep", "infinity"]
