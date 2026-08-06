@@ -1,19 +1,34 @@
 # syntax=docker/dockerfile:1.7
 # CAPABILITIES is a comma-separated manifest supplied by SandboxPlanner.
-ARG SANDBOX_CAPABILITIES=base
-ARG SANDBOX_REVISION=unknown
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS sandbox-base
 
-ARG SANDBOX_CAPABILITIES
-ARG SANDBOX_REVISION
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Start with a small, safe-to-reuse base and add packages only when the manifest
-# asks for their capability. Runtime networking is disabled by SandboxManager.
+# No selected sandbox package comes from restricted or multiverse. Avoid
+# downloading those large indexes on ARM, where Ubuntu uses ports.ubuntu.com.
+RUN sed -i 's/^Components: .*/Components: main universe/' /etc/apt/sources.list.d/ubuntu.sources
+
+# Keep the APT indexes in BuildKit's persistent cache. Deleting
+# /var/lib/apt/lists here would make every capability image download the full
+# Ubuntu package catalog again.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get -o Acquire::Languages=none update; \
+    apt-get install -y --no-install-recommends \
+        bash ca-certificates coreutils file jq python3 tar unzip xxd
+
+FROM sandbox-base
+
+ARG SANDBOX_CAPABILITIES=base
+ARG SANDBOX_REVISION=unknown
+
+# Capability-specific packages remain in a separate layer, so every manifest
+# reuses the common base layer and its APT index cache above. Runtime networking
+# is disabled by SandboxManager.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -eux; \
-    packages="bash ca-certificates coreutils file jq python3 tar unzip xxd"; \
+    packages=""; \
     has() { case ",${SANDBOX_CAPABILITIES}," in *",$1,"*) return 0;; *) return 1;; esac; }; \
     if has web; then packages="$packages curl python3-requests"; fi; \
     if has crypto; then packages="$packages python3-gmpy2 python3-pip"; fi; \
@@ -21,15 +36,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     if has reverse; then packages="$packages binutils gdb radare2"; fi; \
     if has pwn; then packages="$packages build-essential python3-pip python3-dev"; fi; \
     if has stego; then packages="$packages ruby-full steghide"; fi; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends $packages; \
-    rm -rf /var/lib/apt/lists/*
+    if [ -n "$packages" ]; then \
+        apt-get install -y --no-install-recommends $packages; \
+    fi
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     set -eux; \
     has() { case ",${SANDBOX_CAPABILITIES}," in *",$1,"*) return 0;; *) return 1;; esac; }; \
-    if has crypto; then python3 -m pip install --break-system-packages --no-cache-dir pycryptodome; fi; \
-    if has pwn; then python3 -m pip install --break-system-packages --no-cache-dir pwntools ROPgadget; fi; \
+    if has crypto; then python3 -m pip install --break-system-packages pycryptodome; fi; \
+    if has pwn; then python3 -m pip install --break-system-packages pwntools ROPgadget; fi; \
     if has stego; then gem install zsteg --no-document; rm -rf /usr/local/lib/ruby/gems/*/cache; fi
 
 RUN useradd --create-home --shell /bin/bash solver && mkdir /materials

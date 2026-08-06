@@ -26,17 +26,30 @@ class ChatClient:
     def __init__(self, settings: Settings, http_client: httpx.Client | None = None) -> None:
         self.settings = settings
         self.http = http_client or httpx.Client(timeout=90)
+        self.request_counts: dict[str, int] = {}
+        # A key that has returned a quota response stays retired for this run.
+        # This avoids retrying it on each solver turn or on another Gemini
+        # model route before the non-Gemini fallbacks can run.
+        self.exhausted_gemini_api_keys: set[str] = set()
 
     def chat(self, messages: Sequence[dict[str, object]], *, provider: str, model: str,
              tools: list[dict[str, object]] | None = None,
-             timeout_seconds: float | None = None) -> ModelResponse:
+             timeout_seconds: float | None = None,
+             routes: Sequence[ModelRoute] | None = None) -> ModelResponse:
+        """Send a chat request, trying the supplied routes in order when provided.
+
+        The solver supplies the remaining routes after a model has used its turn
+        budget.  This prevents an unavailable later route from falling back to a
+        model whose budget was already exhausted.
+        """
         rate_limited: list[str] = []
         unavailable: list[str] = []
-        configured_routes = self.settings.model_routes(provider, model)
+        configured_routes = tuple(routes) if routes is not None else self.settings.model_routes(provider, model)
         for route in configured_routes:
             if not self._has_credentials(route.provider):
                 continue
             try:
+                self._log_request(route)
                 response = self._chat_route(route, messages, tools, timeout_seconds)
             except RateLimitError:
                 rate_limited.append(f"{route.provider}:{route.model}")
@@ -56,9 +69,16 @@ class ChatClient:
         configured = ", ".join(f"{route.provider}:{route.model}" for route in configured_routes)
         raise ModelError(f"no API key is configured for model routes: {configured}")
 
+    def _log_request(self, route: ModelRoute) -> None:
+        """Show each outbound provider request without exposing request contents."""
+        count = self.request_counts.get(route.provider, 0) + 1
+        self.request_counts[route.provider] = count
+        print(f"{route.provider}:{route.model} request {count}", flush=True)
+
     def _has_credentials(self, provider: str) -> bool:
         return {
-            "gemini": bool(self.settings.gemini_api_key),
+            "gemini": any(key not in self.exhausted_gemini_api_keys
+                          for key in self.settings.configured_gemini_api_keys()),
             "groq": bool(self.settings.groq_api_key),
             "openrouter": bool(self.settings.openrouter_api_key),
         }.get(provider, False)
@@ -79,13 +99,39 @@ class ChatClient:
             response = self.http.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
             raise ModelError(f"provider request failed: {exc}") from exc
-        if response.status_code == 429:
+        if response.status_code == 429 or self._is_token_rate_limit(response):
             raise RateLimitError(response.text)
-        if response.status_code == 404:
+        if response.status_code == 404 or self._is_tool_use_failure(response):
             raise ModelUnavailableError(response.text)
         if response.is_error:
             raise ModelError(f"provider returned {response.status_code}: {response.text[:500]}")
         return response
+
+    @staticmethod
+    def _is_token_rate_limit(response: httpx.Response) -> bool:
+        """Recognise providers that report token quotas as HTTP 413."""
+        if response.status_code != 413:
+            return False
+        try:
+            body = response.json()
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        code = error.get("code") if isinstance(error, dict) else None
+        return code == "rate_limit_exceeded" or "tokens per minute" in response.text.lower()
+
+    @staticmethod
+    def _is_tool_use_failure(response: httpx.Response) -> bool:
+        """Skip a route when its provider rejects that model's malformed tool call."""
+        if response.status_code != 400:
+            return False
+        try:
+            body = response.json()
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        code = error.get("code") if isinstance(error, dict) else None
+        return code == "tool_use_failed"
 
     def _openrouter(self, messages: Sequence[dict[str, object]], model: str,
                     tools: list[dict[str, object]] | None,
@@ -150,8 +196,10 @@ class ChatClient:
     def _gemini(self, messages: Sequence[dict[str, object]], model: str,
                 tools: list[dict[str, object]] | None,
                 timeout_seconds: float | None = None) -> ModelResponse:
-        if not self.settings.gemini_api_key:
-            raise ModelError("GEMINI_API_KEY is not configured")
+        api_keys = [key for key in self.settings.configured_gemini_api_keys()
+                    if key not in self.exhausted_gemini_api_keys]
+        if not api_keys:
+            raise RateLimitError("all configured Gemini API keys are rate limited")
         # Gemini's REST schema separates the system instruction and uses functionDeclarations.
         system = "\n".join(str(m["content"]) for m in messages if m.get("role") == "system")
         contents = self._gemini_contents(messages)
@@ -162,11 +210,21 @@ class ChatClient:
             declarations = [{"name": t["function"]["name"], "description": t["function"].get("description", ""),
                              "parameters": t["function"].get("parameters", {})} for t in tools]
             payload["tools"] = [{"functionDeclarations": declarations}]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.settings.gemini_api_key}"
         request_options: dict[str, object] = {"json": payload}
         if timeout_seconds is not None:
             request_options["timeout"] = timeout_seconds
-        data = self._request("POST", url, **request_options).json()
+        for api_key in api_keys:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            try:
+                data = self._request("POST", url, **request_options).json()
+            except RateLimitError:
+                self.exhausted_gemini_api_keys.add(api_key)
+                continue
+            return self._gemini_response(data)
+        raise RateLimitError("all configured Gemini API keys are rate limited")
+
+    @staticmethod
+    def _gemini_response(data: dict[str, object]) -> ModelResponse:
         parts = data["candidates"][0]["content"].get("parts", [])
         calls = [ToolCall(name=p["functionCall"]["name"], arguments=p["functionCall"].get("args", {}),
                           id=p["functionCall"].get("id") or f"call_{index}",

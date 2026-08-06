@@ -1,1 +1,3 @@
-We received an encrypted message. The modulus is built from primes large enough that factoring them isn’t an option, at least not today. See if you can make sense of the numbers and reveal the flag.
+Clue: OpenAI x Huggingface attack
+http://52.76.96.108:3015/
+ModelHub inference API. POST /upload {"data": } then POST /infer {"id": ...}

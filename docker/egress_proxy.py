@@ -23,6 +23,7 @@ def configured_targets() -> set[tuple[str, int]]:
 
 
 ALLOWED_TARGETS = configured_targets()
+MAX_REQUEST_BODY_BYTES = 1_048_576
 
 
 def permitted_address(host: str, port: int) -> tuple[str, int]:
@@ -80,10 +81,69 @@ class EgressHandler(socketserver.StreamRequestHandler):
                 path += "?" + url.query
             safe_headers = [line for line in headers if not line.lower().startswith(("proxy-authorization:", "proxy-connection:"))]
             upstream.sendall((f"{method} {path} {version}\r\n" + "\r\n".join(safe_headers) + "\r\n\r\n").encode("iso-8859-1"))
+            self._forward_request_body(upstream, headers)
             self._relay(upstream)
         except (OSError, PermissionError, ValueError) as exc:
             status = HTTPStatus.FORBIDDEN if isinstance(exc, PermissionError) else HTTPStatus.BAD_GATEWAY
             self.wfile.write(f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Length: 0\r\n\r\n".encode())
+
+    def _forward_request_body(self, upstream: socket.socket, headers: list[str]) -> None:
+        """Forward a request body already buffered by ``rfile`` before relaying.
+
+        Reading HTTP headers via ``StreamRequestHandler.rfile`` can prefetch the
+        accompanying POST body.  A raw-socket relay alone then never sees that
+        buffered data, leaving an upstream service waiting for Content-Length
+        bytes and the client waiting for its response.
+        """
+        values: dict[str, str] = {}
+        for line in headers:
+            name, separator, value = line.partition(":")
+            if separator:
+                values[name.strip().lower()] = value.strip()
+        if "content-length" in values:
+            try:
+                length = int(values["content-length"])
+            except ValueError as exc:
+                raise ValueError("invalid Content-Length") from exc
+            if length < 0 or length > MAX_REQUEST_BODY_BYTES:
+                raise PermissionError("request body exceeds proxy limit")
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise ValueError("incomplete request body")
+            if body:
+                upstream.sendall(body)
+            return
+        if values.get("transfer-encoding", "").lower() == "chunked":
+            self._forward_chunked_body(upstream)
+
+    def _forward_chunked_body(self, upstream: socket.socket) -> None:
+        """Relay a bounded chunked body, including its framing and trailers."""
+        forwarded = 0
+        while True:
+            size_line = self.rfile.readline(8192)
+            if not size_line:
+                raise ValueError("incomplete chunked request body")
+            upstream.sendall(size_line)
+            try:
+                size = int(size_line.split(b";", 1)[0].strip(), 16)
+            except ValueError as exc:
+                raise ValueError("invalid chunk size") from exc
+            if size < 0 or forwarded + size > MAX_REQUEST_BODY_BYTES:
+                raise PermissionError("request body exceeds proxy limit")
+            if size:
+                chunk = self.rfile.read(size + 2)
+                if len(chunk) != size + 2 or not chunk.endswith(b"\r\n"):
+                    raise ValueError("incomplete chunked request body")
+                upstream.sendall(chunk)
+                forwarded += size
+                continue
+            while True:
+                trailer = self.rfile.readline(8192)
+                if not trailer:
+                    raise ValueError("incomplete chunked request trailers")
+                upstream.sendall(trailer)
+                if trailer in {b"\r\n", b"\n"}:
+                    return
 
     def _relay(self, upstream: socket.socket) -> None:
         with upstream:

@@ -1,0 +1,3 @@
+[submodule "verialabs-ctf-agent"]
+	path = integrations/verialabs-ctf-agent
+	url = https://github.com/verialabs/ctf-agent.git

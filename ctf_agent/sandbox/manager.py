@@ -11,6 +11,8 @@ from ctf_agent.config import Settings
 from ctf_agent.sandbox.executor import SandboxExecutor
 from ctf_agent.sandbox.planner import SandboxPlan
 
+EGRESS_PROXY_HOST = "ctf-egress-proxy"
+
 
 class SandboxManager:
     def __init__(self, settings: Settings) -> None:
@@ -79,7 +81,7 @@ class SandboxManager:
         proxy_name = f"ctf-egress-proxy-{uuid.uuid4().hex[:16]}"
         try:
             proxy = subprocess.run(["docker", "run", "--rm", "-d", "--name", proxy_name,
-                "--network", network, "--read-only", "--cap-drop", "ALL", "--security-opt",
+                "--network", network, "--network-alias", EGRESS_PROXY_HOST, "--read-only", "--cap-drop", "ALL", "--security-opt",
                 "no-new-privileges", "--pids-limit", "64", "--memory", "128m", "--tmpfs",
                 "/tmp:rw,nosuid,nodev,size=16m", "-e", f"EGRESS_TARGETS={json.dumps(targets)}",
                 self.ensure_egress_proxy_image()], text=True, capture_output=True, check=False)
@@ -103,10 +105,10 @@ class SandboxManager:
         egress_proxy_id: str | None = None
         if plan.network_enabled:
             egress_network, egress_proxy_id = self._start_egress_proxy(plan.network_targets)
-            network_args = ["--network", egress_network, "-e", "HTTP_PROXY=http://ctf-egress-proxy:3128",
-                            "-e", "HTTPS_PROXY=http://ctf-egress-proxy:3128",
-                            "-e", "http_proxy=http://ctf-egress-proxy:3128",
-                            "-e", "https_proxy=http://ctf-egress-proxy:3128"]
+            proxy_url = f"http://{EGRESS_PROXY_HOST}:3128"
+            network_args = ["--network", egress_network, "-e", f"HTTP_PROXY={proxy_url}",
+                            "-e", f"HTTPS_PROXY={proxy_url}",
+                            "-e", f"http_proxy={proxy_url}", "-e", f"https_proxy={proxy_url}"]
             network_label = "target-authorized proxy network"
         else:
             network_args = ["--network", "none"]

@@ -45,21 +45,33 @@ class SandboxPlan:
 
 class SandboxPlanner:
     def create(self, decision: ThemeDecision, network_targets: tuple[str, ...] = ()) -> SandboxPlan:
-        allowed = THEME_CAPABILITIES[decision.theme]
+        allowed = self._allowed_capabilities(decision.theme, network_targets)
         selected = tuple(capability for capability in decision.initial_capabilities if capability in allowed)
         if not selected and decision.theme != "misc":
             selected = (decision.theme,)
-        targets = network_targets if decision.theme == "web" and "web" in selected else ()
-        return self._plan(decision.theme, selected, decision.evidence, targets)
+        rationale = decision.evidence
+        if network_targets and "web" not in selected:
+            # An explicit challenge URL is sufficient, auditable evidence for
+            # the narrowly allow-listed web capability—even for a primarily
+            # crypto, reverse, or misc challenge.
+            selected = tuple((*selected, "web"))
+            rationale = tuple((*rationale, "explicit HTTP(S) challenge target"))
+        targets = network_targets if "web" in selected else ()
+        return self._plan(decision.theme, selected, rationale, targets)
 
     def expand(self, plan: SandboxPlan, requested: list[str], reason: str) -> SandboxPlan | None:
-        allowed = THEME_CAPABILITIES[plan.theme]
+        allowed = self._allowed_capabilities(plan.theme, plan.network_targets)
         additions = tuple(capability for capability in requested
                           if capability in CAPABILITIES and capability in allowed and capability not in plan.capabilities)
         if not additions:
             return None
         return self._plan(plan.theme, tuple((*plan.capabilities, *additions)),
                           tuple((*plan.rationale, f"approved expansion: {reason}")), plan.network_targets)
+
+    @staticmethod
+    def _allowed_capabilities(theme: str, network_targets: tuple[str, ...]) -> frozenset[str]:
+        allowed = THEME_CAPABILITIES[theme]
+        return allowed | frozenset({"web"}) if network_targets else allowed
 
     @staticmethod
     def _plan(theme: str, capabilities: tuple[str, ...], rationale: tuple[str, ...],

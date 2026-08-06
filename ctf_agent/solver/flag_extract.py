@@ -11,7 +11,11 @@ def _is_placeholder(candidate: str) -> bool:
         return False
     normalized = body.casefold().replace("-", "_").replace(" ", "_")
     template_values = {"...", "…", "flag", "flag_here", "your_flag", "your_flag_here", "insert_flag"}
-    return not any(character.isalnum() for character in body) or normalized in template_values
+    # A model can hallucinate binary as a textual ``\\xNN`` escape sequence.
+    # It is neither a printable flag payload nor evidence of a solution.
+    escaped_byte = re.search(r"\\x[0-9a-fA-F]{2}", body)
+    return (not body.isprintable() or escaped_byte is not None or
+            not any(character.isalnum() for character in body) or normalized in template_values)
 
 
 def extract_flag(text: str, pattern: str) -> str | None:
