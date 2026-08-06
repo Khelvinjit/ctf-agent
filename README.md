@@ -9,10 +9,17 @@ Copy `.env.example` to `.env` and configure one model provider:
 ```text
 GEMINI_API_KEY=...
 MODEL_PROVIDER=gemini
-MODEL_NAME=gemini-2.5-flash
+MODEL_NAME=gemini-3.6-flash
+# Optional rate-limit fallbacks; routes without a key are skipped.
+GROQ_API_KEY=...
+OPENROUTER_API_KEY=...
+MODEL_ROTATION=gemini:gemini-3.6-flash,groq:openai/gpt-oss-120b,openrouter:openrouter/free
 ```
 
-Alternatively set `OPENROUTER_API_KEY` and `MODEL_PROVIDER=openrouter`. Then add the authorised material:
+The runner rotates to the next configured Gemini, Groq, or OpenRouter route only
+when the active provider returns HTTP 429. Set `MODEL_PROVIDER` and `MODEL_NAME`
+to choose the first route; routes without a configured key are skipped. Then add
+the authorised material:
 
 ```text
 challenge_materials/
@@ -34,7 +41,7 @@ On success, the runner writes `FLAG: <value>` to stdout. It stores the classific
 
 The model first sees only the description and a safe inventory of filenames, MIME types, hashes, sizes, and archive member names. It chooses a theme (`web`, `crypto`, `forensics`, `reverse`, `pwn`, `stego`, or `misc`) and no more than two capabilities for an initial investigation. The runner builds and caches a Docker image keyed to that manifest.
 
-At runtime, the container has no Linux capabilities, a read-only `/materials` mount, a disposable writable `/tmp` filesystem, process and memory limits, and command/challenge timeouts. It runs with no network by default. A web challenge whose description explicitly supplies an HTTP(S) URL receives network access for that run so it can analyse that authorised target; the solver rejects commands for any other URL. Symlinks in `challenge_materials/` are rejected before the directory is mounted. The agent may request one logged, theme-compatible capability expansion if the first sandbox produces concrete evidence that it is needed.
+At runtime, the container has no Linux capabilities, a read-only `/materials` mount, a disposable writable `/tmp` filesystem, process and memory limits, and command/challenge timeouts. It runs with no network by default. A web challenge whose description explicitly supplies an HTTP(S) URL is attached only to a private network and reaches the declared host and port through an allow-list proxy; private, loopback, and undeclared destinations are rejected. Symlinks in `challenge_materials/` are rejected before the directory is mounted. The agent may request one logged, theme-compatible capability expansion if the first sandbox produces concrete evidence that it is needed.
 
 This version does not log into a CTF platform, discover remote challenges, or submit flags. A URL explicitly included in an authorised web challenge description is the exception: it is treated as the target for that one sandboxed solve.
 

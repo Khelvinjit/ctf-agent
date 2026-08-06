@@ -19,6 +19,9 @@ class ToolCall:
     name: str
     arguments: dict[str, object]
     id: str | None = None
+    # Gemini thinking models require this opaque value to be replayed with the
+    # original function call on the next turn.
+    thought_signature: str | None = None
 
 
 @dataclass(slots=True)
@@ -26,6 +29,10 @@ class ModelResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw: object | None = None
+    provider: str | None = None
+    model: str | None = None
+    rate_limited_routes: tuple[str, ...] = ()
+    unavailable_routes: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

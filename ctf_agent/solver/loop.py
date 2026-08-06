@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import time
 import re
+import math
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ctf_agent.config import Settings
 from ctf_agent.models.client import ChatClient, ModelError
-from ctf_agent.sandbox.executor import SandboxExecutor
+from ctf_agent.sandbox.executor import CommandResult, SandboxExecutor
 from ctf_agent.sandbox.planner import SandboxPlan
 from ctf_agent.skills.router import SkillRouter
 from ctf_agent.solver.flag_extract import extract_flag
@@ -67,6 +69,7 @@ class SolverLoop:
                                    for event in (prior_transcript or [])[-12:])[-12000:]
         system = f"""You are a careful CTF solver. Work only on this authorized challenge in the sandbox.
 Find the flag matching {self.settings.flag_format_regex}. Verify candidates before reporting them.
+Never report a source-code template or placeholder such as `picoCTF{{...}}` as a flag; it is not evidence of a solution.
 Challenge: {challenge.title} ({challenge.category})
 Description:\n{challenge.description}
 Files are read-only under /materials: {', '.join(f'/materials/{Path(path).as_posix()}' for path in challenge.files) or 'none'}
@@ -83,21 +86,89 @@ Request a sandbox expansion only for a concrete missing, local-analysis capabili
         flag: str | None = None
         requested_capabilities: list[str] = []
         started = time.monotonic()
+        deadline = started + self.settings.challenge_timeout_seconds
+
+        def remaining_seconds() -> float:
+            return deadline - time.monotonic()
+
+        def request_model() -> ModelResponse:
+            """Do not let a provider request extend the challenge deadline."""
+            remaining = remaining_seconds()
+            if remaining <= 0:
+                raise TimeoutError("challenge timeout")
+            response: list[ModelResponse] = []
+            failure: list[Exception] = []
+
+            def call() -> None:
+                try:
+                    response.append(self.model.chat(
+                        history, provider=self.settings.model_provider, model=self.settings.model_name,
+                        tools=TOOL_SCHEMAS, timeout_seconds=max(1, math.ceil(remaining))))
+                except TypeError as exc:
+                    # Test and third-party clients that predate the optional
+                    # timeout parameter still work; the daemon thread keeps the
+                    # solve loop's outward deadline hard.
+                    if "timeout_seconds" not in str(exc):
+                        failure.append(exc)
+                        return
+                    try:
+                        response.append(self.model.chat(
+                            history, provider=self.settings.model_provider, model=self.settings.model_name,
+                            tools=TOOL_SCHEMAS))
+                    except Exception as retry_exc:  # pragma: no cover - provider-specific
+                        failure.append(retry_exc)
+                except Exception as exc:  # pragma: no cover - provider-specific
+                    failure.append(exc)
+
+            worker = threading.Thread(target=call, daemon=True)
+            worker.start()
+            worker.join(remaining)
+            if worker.is_alive():
+                raise TimeoutError("challenge timeout")
+            if failure:
+                raise failure[0]
+            if not response:
+                raise ModelError("model returned no response")
+            return response[0]
 
         def record(event: dict[str, object]) -> None:
             transcript.append(event)
             if log:
                 log(event)
 
+        def run_command_before_deadline(command: str, timeout: int) -> CommandResult:
+            """Return at the solve deadline even if Docker fails to return."""
+            result: list[CommandResult] = []
+
+            def call() -> None:
+                result.append(executor.run(command, timeout))
+
+            worker = threading.Thread(target=call, daemon=True)
+            worker.start()
+            worker.join(max(0, remaining_seconds()))
+            if worker.is_alive():
+                terminate = getattr(executor, "terminate", None)
+                if callable(terminate):
+                    terminate()
+                return CommandResult("", "challenge timeout; sandbox terminated", 124, True)
+            return result[0] if result else CommandResult("", "sandbox command returned no result", 125)
+
         def execute_call(call: ToolCall) -> tuple[str, dict[str, object]]:
             if call.name == "run_command":
                 command = str(call.arguments.get("command", ""))
-                timeout = min(int(call.arguments.get("timeout", self.settings.command_timeout_seconds)), self.settings.command_timeout_seconds)
+                remaining = remaining_seconds()
+                if remaining <= 0:
+                    return "Challenge deadline reached; command was not started.", {
+                        "command": command, "timeout_seconds": 0, "exit_code": 124,
+                        "timed_out": True, "stdout": "", "stderr": "challenge timeout",
+                    }
+                timeout = min(int(call.arguments.get("timeout", self.settings.command_timeout_seconds)),
+                              self.settings.command_timeout_seconds, max(1, math.floor(remaining)))
                 denied = command_denial(command, plan.network_targets)
                 if denied:
                     return denied, {"command": command, "timeout_seconds": timeout, "exit_code": 126,
                                     "timed_out": False, "stdout": "", "stderr": denied, "denied": True}
-                result = executor.run(command, timeout)
+                result = run_command_before_deadline(command, timeout)
                 stdout, stderr = result.stdout[-12000:], result.stderr[-4000:]
                 failure = target_failure_reason(command, result.exit_code, plan.network_targets)
                 return (f"exit={result.exit_code}\ntimed_out={result.timed_out}\nstdout:\n{stdout}\nstderr:\n{stderr}",
@@ -124,25 +195,30 @@ Request a sandbox expansion only for a concrete missing, local-analysis capabili
             {"role": "user", "content": "Begin by inspecting the supplied local material with the available tools."},
         ]
         model_name: str | None = None
+        model_provider: str | None = None
         for _ in range(self.settings.max_iterations):
-            if time.monotonic() - started >= self.settings.challenge_timeout_seconds:
+            if remaining_seconds() <= 0:
                 break
             try:
-                response = self.model.chat(history, provider=self.settings.model_provider,
-                                           model=self.settings.model_name, tools=TOOL_SCHEMAS)
+                response = request_model()
+            except TimeoutError:
+                return SolveResult(None, model_name, "challenge timeout", transcript=transcript)
             except ModelError as exc:
                 return SolveResult(None, model_name, f"model error: {exc}", transcript=transcript)
-            model_name = self.settings.model_name
-            record({"event": "model", "model": model_name, "text": response.text,
+            model_name = response.model or self.settings.model_name
+            model_provider = response.provider or self.settings.model_provider
+            record({"event": "model", "provider": model_provider, "model": model_name,
+                    "rate_limited_routes": response.rate_limited_routes,
+                    "unavailable_routes": response.unavailable_routes, "text": response.text,
                     "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in response.tool_calls]})
             flag = extract_flag(response.text, self.settings.flag_format_regex)
             if flag:
                 return SolveResult(flag, model_name, transcript=transcript)
-            history.append({"role": "assistant", "content": response.text})
+            history.append({"role": "assistant", "content": response.text, "tool_calls": response.tool_calls})
             messages: list[dict[str, object]] = []
             for call in response.tool_calls:
                 output, details = execute_call(call)
-                event: dict[str, object] = {"event": "tool", "model": model_name, "tool": call.name,
+                event: dict[str, object] = {"event": "tool", "provider": model_provider, "model": model_name, "tool": call.name,
                                             "arguments": call.arguments, "output": output}
                 event.update(details)
                 record(event)
@@ -151,7 +227,8 @@ Request a sandbox expansion only for a concrete missing, local-analysis capabili
                 candidate = extract_flag(output, self.settings.flag_format_regex)
                 if candidate:
                     return SolveResult(candidate, model_name, transcript=transcript)
-                messages.append({"role": "user", "content": f"Tool `{call.name}` result:\n{output}"})
+                messages.append({"role": "tool", "tool_call_id": call.id or call.name,
+                                 "name": call.name, "content": output})
             if requested_capabilities:
                 return SolveResult(None, model_name, nonlocal_requested_reason[0] or "sandbox expansion requested", requested_capabilities,
                                    transcript)
@@ -159,5 +236,5 @@ Request a sandbox expansion only for a concrete missing, local-analysis capabili
                 history.extend(messages)
             else:
                 history.append({"role": "user", "content": "Continue solving. Use a tool if evidence is needed; state any candidate flag plainly."})
-        reason = "challenge timeout" if time.monotonic() - started >= self.settings.challenge_timeout_seconds else "iteration budget exhausted"
+        reason = "challenge timeout" if remaining_seconds() <= 0 else "iteration budget exhausted"
         return SolveResult(flag=None, model=model_name, reason=reason, transcript=transcript)
