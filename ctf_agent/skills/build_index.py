@@ -1,4 +1,5 @@
 """Build a compact, offline FTS technique index from a local ctf-skills checkout."""
+
 from __future__ import annotations
 
 import argparse
@@ -18,8 +19,14 @@ def _entries(markdown: str) -> list[tuple[str, str]]:
         name = re.sub(r"[`*_]", "", match.group(1)).strip()
         if len(name) < 4 or len(name) > 180:
             continue
-        context = next((candidate for candidate in lines[i + 1:i + 4]
-                        if candidate and not candidate.startswith(("#", "-", "*"))), "")
+        context = next(
+            (
+                candidate
+                for candidate in lines[i + 1 : i + 4]
+                if candidate and not candidate.startswith(("#", "-", "*"))
+            ),
+            "",
+        )
         found.append((name, context[:400]))
     return found
 
@@ -34,9 +41,13 @@ def build_index(source: Path, destination: Path) -> int:
     total = 0
     for skill_file in source.rglob("SKILL.md"):
         category = skill_file.parent.name.removeprefix("ctf-").replace("_", " ")
-        for name, snippet in _entries(skill_file.read_text(encoding="utf-8", errors="ignore")):
-            connection.execute("INSERT INTO techniques(category,name,snippet) VALUES (?,?,?)",
-                               (category, name, snippet))
+        for name, snippet in _entries(
+            skill_file.read_text(encoding="utf-8", errors="ignore")
+        ):
+            connection.execute(
+                "INSERT INTO techniques(category,name,snippet) VALUES (?,?,?)",
+                (category, name, snippet),
+            )
             total += 1
     connection.commit()
     connection.close()
@@ -45,8 +56,13 @@ def build_index(source: Path, destination: Path) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help="local checkout of ljagiello/ctf-skills")
-    parser.add_argument("--output", type=Path, default=Path("ctf_agent/skills/index.sqlite"))
+    parser.add_argument(
+        "source", type=Path, help="local checkout of ljagiello/ctf-skills"
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("ctf_agent/skills/index.sqlite")
+    )
     args = parser.parse_args()
-    print(f"Indexed {build_index(args.source, args.output)} techniques in {args.output}")
-
+    print(
+        f"Indexed {build_index(args.source, args.output)} techniques in {args.output}"
+    )

@@ -1,4 +1,5 @@
 """Safe challenge-material inventory and AI-assisted theme classification."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,9 +9,9 @@ import re
 import subprocess
 import tarfile
 import zipfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from collections.abc import Callable
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -44,8 +45,14 @@ class ThemeDecision:
 
 
 class ChatModel(Protocol):
-    def chat(self, messages: list[dict[str, object]], *, provider: str, model: str,
-             tools: list[dict[str, object]] | None = None) -> ModelResponse: ...
+    def chat(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        provider: str,
+        model: str,
+        tools: list[dict[str, object]] | None = None,
+    ) -> ModelResponse: ...
 
 
 def assert_safe_materials(root: Path) -> None:
@@ -56,7 +63,9 @@ def assert_safe_materials(root: Path) -> None:
         raise ValueError(f"challenge materials directory does not exist: {root}")
     for item in root.rglob("*"):
         if item.is_symlink():
-            raise ValueError(f"symlinks are not allowed in challenge materials: {item.relative_to(root)}")
+            raise ValueError(
+                f"symlinks are not allowed in challenge materials: {item.relative_to(root)}"
+            )
 
 
 def _hash_file(path: Path) -> str:
@@ -88,21 +97,39 @@ def inventory_materials(root: Path) -> list[MaterialItem]:
         relative = path.relative_to(root).as_posix()
         # `file` only identifies bytes; it does not execute the attachment.
         try:
-            identified = subprocess.run(["file", "--brief", "--no-dereference", str(path)], text=True,
-                                        capture_output=True, timeout=5, check=False)
+            identified = subprocess.run(
+                ["file", "--brief", "--no-dereference", str(path)],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
             file_type = identified.stdout.strip() if identified.returncode == 0 else ""
         except (OSError, subprocess.TimeoutExpired):
             file_type = ""
-        file_type = file_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        result.append(MaterialItem(relative, path.stat().st_size, _hash_file(path), file_type,
-                                   _archive_members(path)))
+        file_type = (
+            file_type
+            or mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream"
+        )
+        result.append(
+            MaterialItem(
+                relative,
+                path.stat().st_size,
+                _hash_file(path),
+                file_type,
+                _archive_members(path),
+            )
+        )
     return result
 
 
 def challenge_urls(description: str) -> tuple[str, ...]:
     """Return explicitly supplied HTTP(S) targets, preserving their first occurrence."""
     urls = re.findall(r"https?://[^\s<>\]\[\"')]+", description, flags=re.IGNORECASE)
-    return tuple(dict.fromkeys(url.rstrip(".,;:") for url in urls if urlparse(url).netloc))
+    return tuple(
+        dict.fromkeys(url.rstrip(".,;:") for url in urls if urlparse(url).netloc)
+    )
 
 
 def _json_object(text: str) -> dict[str, object]:
@@ -115,8 +142,12 @@ def _json_object(text: str) -> dict[str, object]:
     return value
 
 
-def _fallback_theme(description: str, declared_category: str, items: list[MaterialItem]) -> ThemeDecision:
-    haystack = " ".join([description, declared_category, *(item.path for item in items)]).lower()
+def _fallback_theme(
+    description: str, declared_category: str, items: list[MaterialItem]
+) -> ThemeDecision:
+    haystack = " ".join(
+        [description, declared_category, *(item.path for item in items)]
+    ).lower()
     keywords = {
         "crypto": ("crypto", "cipher", "vigen", "rsa", "aes", "base64"),
         "forensics": ("forensic", "pcap", "disk", "memory", "metadata"),
@@ -125,19 +156,39 @@ def _fallback_theme(description: str, declared_category: str, items: list[Materi
         "stego": ("stego", "stegan", "hidden image", "lsb"),
         "web": ("web", "html", "javascript", "http", "cookie"),
     }
-    theme = next((name for name, words in keywords.items() if any(word in haystack for word in words)), "misc")
+    theme = next(
+        (
+            name
+            for name, words in keywords.items()
+            if any(word in haystack for word in words)
+        ),
+        "misc",
+    )
     capabilities = () if theme == "misc" else (theme,)
-    return ThemeDecision(theme, 0.2, ("fallback keyword classification",), capabilities,
-                         ("AI classification was unavailable",), "fallback")
+    return ThemeDecision(
+        theme,
+        0.2,
+        ("fallback keyword classification",),
+        capabilities,
+        ("AI classification was unavailable",),
+        "fallback",
+    )
 
 
 class ThemeClassifier:
-    def __init__(self, model: ChatModel, provider: str, model_name: str,
-                 progress: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        model: ChatModel,
+        provider: str,
+        model_name: str,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
         self.model, self.provider, self.model_name = model, provider, model_name
         self.progress = progress
 
-    def classify(self, description: str, declared_category: str, items: list[MaterialItem]) -> ThemeDecision:
+    def classify(
+        self, description: str, declared_category: str, items: list[MaterialItem]
+    ) -> ThemeDecision:
         inventory = [asdict(item) for item in items]
         if self.progress:
             self.progress("Asking the agent to classify the challenge theme…")
@@ -152,9 +203,17 @@ Description:
 Inventory:
 {json.dumps(inventory, ensure_ascii=False)}"""
         try:
-            response = self.model.chat([{"role": "system", "content": "You are a cautious CTF triage agent."},
-                                         {"role": "user", "content": classification_prompt}],
-                                       provider=self.provider, model=self.model_name)
+            response = self.model.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are a cautious CTF triage agent.",
+                    },
+                    {"role": "user", "content": classification_prompt},
+                ],
+                provider=self.provider,
+                model=self.model_name,
+            )
             data = _json_object(response.text)
             theme = str(data.get("theme", "")).lower()
             if theme not in THEMES:
@@ -173,13 +232,28 @@ Classification evidence: {json.dumps(evidence)}
 Description: {description}
 Inventory: {json.dumps(inventory, ensure_ascii=False)}"""
             if self.progress:
-                self.progress("Asking the agent to select the minimal sandbox capabilities…")
-            planning_response = self.model.chat([{"role": "system", "content": "You are a cautious CTF sandbox planner."},
-                                                  {"role": "user", "content": planning_prompt}],
-                                                provider=self.provider, model=self.model_name)
+                self.progress(
+                    "Asking the agent to select the minimal sandbox capabilities…"
+                )
+            planning_response = self.model.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are a cautious CTF sandbox planner.",
+                    },
+                    {"role": "user", "content": planning_prompt},
+                ],
+                provider=self.provider,
+                model=self.model_name,
+            )
             planning = _json_object(planning_response.text)
-            capabilities = tuple(dict.fromkeys(str(value).lower() for value in planning.get("initial_capabilities", [])
-                                                if str(value).lower() in CAPABILITIES))
+            capabilities = tuple(
+                dict.fromkeys(
+                    str(value).lower()
+                    for value in planning.get("initial_capabilities", [])
+                    if str(value).lower() in CAPABILITIES
+                )
+            )
             if len(capabilities) > 2:
                 raise ValueError("sandbox plan requested too many capabilities")
             return ThemeDecision(theme, confidence, evidence, capabilities, unknowns)

@@ -8,3 +8,4 @@ logs/*
 !logs/.gitkeep
 ctf_agent/skills/index.sqlite
 ctf_agent/skills/vendor/
+.DS_STORE

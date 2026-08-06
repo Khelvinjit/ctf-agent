@@ -1,4 +1,5 @@
 """Constrain the agent's requested tooling to a small, reproducible sandbox plan."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,16 +9,21 @@ from dataclasses import asdict, dataclass
 from ctf_agent.classifier import CAPABILITIES, ThemeDecision
 
 THEME_CAPABILITIES: dict[str, frozenset[str]] = {
-    "web": frozenset({"web"}), "crypto": frozenset({"crypto"}),
-    "forensics": frozenset({"forensics", "stego"}), "reverse": frozenset({"reverse"}),
-    "pwn": frozenset({"pwn", "reverse"}), "stego": frozenset({"stego", "forensics"}),
+    "web": frozenset({"web"}),
+    "crypto": frozenset({"crypto"}),
+    "forensics": frozenset({"forensics", "stego"}),
+    "reverse": frozenset({"reverse"}),
+    "pwn": frozenset({"pwn", "reverse"}),
+    "stego": frozenset({"stego", "forensics"}),
     "misc": frozenset(),
 }
 TOOL_SUMMARIES: dict[str, tuple[str, ...]] = {
     "base": ("python3", "file", "strings", "xxd", "unzip", "tar", "jq"),
-    "web": ("curl", "python requests"), "crypto": ("pycryptodome", "gmpy2"),
+    "web": ("curl", "python requests"),
+    "crypto": ("pycryptodome", "gmpy2"),
     "forensics": ("exiftool", "binwalk", "foremost", "tshark"),
-    "reverse": ("binutils", "gdb", "radare2"), "pwn": ("pwntools", "ROPgadget", "gcc"),
+    "reverse": ("binutils", "gdb", "radare2"),
+    "pwn": ("pwntools", "ROPgadget", "gcc"),
     "stego": ("steghide", "zsteg"),
 }
 
@@ -44,9 +50,15 @@ class SandboxPlan:
 
 
 class SandboxPlanner:
-    def create(self, decision: ThemeDecision, network_targets: tuple[str, ...] = ()) -> SandboxPlan:
+    def create(
+        self, decision: ThemeDecision, network_targets: tuple[str, ...] = ()
+    ) -> SandboxPlan:
         allowed = self._allowed_capabilities(decision.theme, network_targets)
-        selected = tuple(capability for capability in decision.initial_capabilities if capability in allowed)
+        selected = tuple(
+            capability
+            for capability in decision.initial_capabilities
+            if capability in allowed
+        )
         if not selected and decision.theme != "misc":
             selected = (decision.theme,)
         rationale = decision.evidence
@@ -59,23 +71,44 @@ class SandboxPlanner:
         targets = network_targets if "web" in selected else ()
         return self._plan(decision.theme, selected, rationale, targets)
 
-    def expand(self, plan: SandboxPlan, requested: list[str], reason: str) -> SandboxPlan | None:
+    def expand(
+        self, plan: SandboxPlan, requested: list[str], reason: str
+    ) -> SandboxPlan | None:
         allowed = self._allowed_capabilities(plan.theme, plan.network_targets)
-        additions = tuple(capability for capability in requested
-                          if capability in CAPABILITIES and capability in allowed and capability not in plan.capabilities)
+        additions = tuple(
+            capability
+            for capability in requested
+            if capability in CAPABILITIES
+            and capability in allowed
+            and capability not in plan.capabilities
+        )
         if not additions:
             return None
-        return self._plan(plan.theme, tuple((*plan.capabilities, *additions)),
-                          tuple((*plan.rationale, f"approved expansion: {reason}")), plan.network_targets)
+        return self._plan(
+            plan.theme,
+            tuple((*plan.capabilities, *additions)),
+            tuple((*plan.rationale, f"approved expansion: {reason}")),
+            plan.network_targets,
+        )
 
     @staticmethod
-    def _allowed_capabilities(theme: str, network_targets: tuple[str, ...]) -> frozenset[str]:
+    def _allowed_capabilities(
+        theme: str, network_targets: tuple[str, ...]
+    ) -> frozenset[str]:
         allowed = THEME_CAPABILITIES[theme]
         return allowed | frozenset({"web"}) if network_targets else allowed
 
     @staticmethod
-    def _plan(theme: str, capabilities: tuple[str, ...], rationale: tuple[str, ...],
-              network_targets: tuple[str, ...] = ()) -> SandboxPlan:
+    def _plan(
+        theme: str,
+        capabilities: tuple[str, ...],
+        rationale: tuple[str, ...],
+        network_targets: tuple[str, ...] = (),
+    ) -> SandboxPlan:
         all_capabilities = tuple(dict.fromkeys(("base", *capabilities)))
-        tools = tuple(tool for capability in all_capabilities for tool in TOOL_SUMMARIES[capability])
+        tools = tuple(
+            tool
+            for capability in all_capabilities
+            for tool in TOOL_SUMMARIES[capability]
+        )
         return SandboxPlan(theme, all_capabilities, tools, rationale, network_targets)

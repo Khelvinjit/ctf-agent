@@ -16,6 +16,7 @@ class CommandResult:
 @dataclass(slots=True)
 class TargetPreflight:
     """The result of one proxy-routed request to an approved challenge URL."""
+
     target: str
     command: str
     result: CommandResult
@@ -34,14 +35,24 @@ def target_transport_failure_reason(target: str, result: CommandResult) -> str |
     output = f"{result.stdout}\n{result.stderr}".lower()
     if result.timed_out or result.exit_code == 28 or "connection timed out" in output:
         detail = "connection timed out"
-    elif result.exit_code == 5 or "could not resolve proxy" in output or (
-            "proxyerror" in output and "resolve" in output):
+    elif (
+        result.exit_code == 5
+        or "could not resolve proxy" in output
+        or ("proxyerror" in output and "resolve" in output)
+    ):
         detail = "egress proxy could not be resolved"
-    elif result.exit_code == 6 or "temporary failure in name resolution" in output or (
-            "name or service not known" in output and "proxy" not in output):
+    elif (
+        result.exit_code == 6
+        or "temporary failure in name resolution" in output
+        or ("name or service not known" in output and "proxy" not in output)
+    ):
         detail = "target DNS resolution failed"
-    elif result.exit_code == 7 or "network is unreachable" in output or "couldn't connect to server" in output or (
-            "failed to connect to" in output and "http" in output):
+    elif (
+        result.exit_code == 7
+        or "network is unreachable" in output
+        or "couldn't connect to server" in output
+        or ("failed to connect to" in output and "http" in output)
+    ):
         detail = "connection was refused or unreachable"
     else:
         return None
@@ -49,8 +60,14 @@ def target_transport_failure_reason(target: str, result: CommandResult) -> str |
 
 
 class SandboxExecutor:
-    def __init__(self, container_id: str, timeout_seconds: int = 60, *,
-                 egress_proxy_id: str | None = None, egress_network: str | None = None) -> None:
+    def __init__(
+        self,
+        container_id: str,
+        timeout_seconds: int = 60,
+        *,
+        egress_proxy_id: str | None = None,
+        egress_network: str | None = None,
+    ) -> None:
         self.container_id, self.timeout_seconds = container_id, timeout_seconds
         self.egress_proxy_id, self.egress_network = egress_proxy_id, egress_network
         self.terminated = False
@@ -59,7 +76,12 @@ class SandboxExecutor:
         """Destroy this sandbox when an outer deadline expires."""
         if self.terminated:
             return
-        subprocess.run(["docker", "kill", self.container_id], text=True, capture_output=True, check=False)
+        subprocess.run(
+            ["docker", "kill", self.container_id],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         self.terminated = True
 
     def run(self, command: str, timeout: int | None = None) -> CommandResult:
@@ -70,14 +92,39 @@ class SandboxExecutor:
         # and then KILL even when the host-side Docker client stays healthy.
         wrapped = f'exec timeout --signal=TERM --kill-after=5s {limit}s bash -lc "$1"'
         try:
-            completed = subprocess.run(["docker", "exec", self.container_id, "bash", "-lc", wrapped,
-                                        "--", command], text=True, capture_output=True,
-                                       timeout=limit + 10, check=False)
-            return CommandResult(completed.stdout, completed.stderr, completed.returncode,
-                                 completed.returncode == 124)
+            completed = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    self.container_id,
+                    "bash",
+                    "-lc",
+                    wrapped,
+                    "--",
+                    command,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=limit + 10,
+                check=False,
+            )
+            return CommandResult(
+                completed.stdout,
+                completed.stderr,
+                completed.returncode,
+                completed.returncode == 124,
+            )
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else exc.stdout or ""
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr or ""
+            stdout = (
+                exc.stdout.decode()
+                if isinstance(exc.stdout, bytes)
+                else exc.stdout or ""
+            )
+            stderr = (
+                exc.stderr.decode()
+                if isinstance(exc.stderr, bytes)
+                else exc.stderr or ""
+            )
             # If Docker itself fails to return after the in-container grace
             # period, destroy the whole sandbox. This prevents orphaned work.
             self.terminate()
@@ -98,6 +145,12 @@ class SandboxExecutor:
         result = self.run(command, limit)
         reason = target_transport_failure_reason(target, result)
         if result.exit_code != 0 and reason is None:
-            detail = result.stderr.strip() or result.stdout.strip() or f"curl exited with status {result.exit_code}"
-            reason = f"authorised challenge target preflight failed: {target} ({detail})"
+            detail = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"curl exited with status {result.exit_code}"
+            )
+            reason = (
+                f"authorised challenge target preflight failed: {target} ({detail})"
+            )
         return TargetPreflight(target, command, result, result.exit_code == 0, reason)

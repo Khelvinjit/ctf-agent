@@ -1,4 +1,5 @@
 """A tiny HTTP(S) CONNECT proxy restricted to explicit public CTF targets."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -18,7 +19,12 @@ def configured_targets() -> set[tuple[str, int]]:
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError(f"invalid egress target: {value}")
-        targets.add((parsed.hostname.rstrip(".").lower(), parsed.port or (443 if parsed.scheme == "https" else 80)))
+        targets.add(
+            (
+                parsed.hostname.rstrip(".").lower(),
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+            )
+        )
     return targets
 
 
@@ -65,29 +71,58 @@ class EgressHandler(socketserver.StreamRequestHandler):
                 headers.append(line.rstrip("\r\n"))
             if method.upper() == "CONNECT":
                 host, port = parse_authority(target, 443)
-                upstream = socket.create_connection(permitted_address(host, port), timeout=self.timeout)
+                upstream = socket.create_connection(
+                    permitted_address(host, port), timeout=self.timeout
+                )
                 self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 self._relay(upstream)
                 return
             url = urlsplit(target)
             if url.scheme not in {"http", "https"} or not url.hostname:
-                raise PermissionError("proxy requests must contain an absolute HTTP(S) URL")
-            host, port = url.hostname, url.port or (443 if url.scheme == "https" else 80)
+                raise PermissionError(
+                    "proxy requests must contain an absolute HTTP(S) URL"
+                )
+            host, port = (
+                url.hostname,
+                url.port or (443 if url.scheme == "https" else 80),
+            )
             if url.scheme != "http":
                 raise PermissionError("HTTPS requests must use CONNECT")
-            upstream = socket.create_connection(permitted_address(host, port), timeout=self.timeout)
+            upstream = socket.create_connection(
+                permitted_address(host, port), timeout=self.timeout
+            )
             path = url.path or "/"
             if url.query:
                 path += "?" + url.query
-            safe_headers = [line for line in headers if not line.lower().startswith(("proxy-authorization:", "proxy-connection:"))]
-            upstream.sendall((f"{method} {path} {version}\r\n" + "\r\n".join(safe_headers) + "\r\n\r\n").encode("iso-8859-1"))
+            safe_headers = [
+                line
+                for line in headers
+                if not line.lower().startswith(
+                    ("proxy-authorization:", "proxy-connection:")
+                )
+            ]
+            upstream.sendall(
+                (
+                    f"{method} {path} {version}\r\n"
+                    + "\r\n".join(safe_headers)
+                    + "\r\n\r\n"
+                ).encode("iso-8859-1")
+            )
             self._forward_request_body(upstream, headers)
             self._relay(upstream)
         except (OSError, PermissionError, ValueError) as exc:
-            status = HTTPStatus.FORBIDDEN if isinstance(exc, PermissionError) else HTTPStatus.BAD_GATEWAY
-            self.wfile.write(f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Length: 0\r\n\r\n".encode())
+            status = (
+                HTTPStatus.FORBIDDEN
+                if isinstance(exc, PermissionError)
+                else HTTPStatus.BAD_GATEWAY
+            )
+            self.wfile.write(
+                f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Length: 0\r\n\r\n".encode()
+            )
 
-    def _forward_request_body(self, upstream: socket.socket, headers: list[str]) -> None:
+    def _forward_request_body(
+        self, upstream: socket.socket, headers: list[str]
+    ) -> None:
         """Forward a request body already buffered by ``rfile`` before relaying.
 
         Reading HTTP headers via ``StreamRequestHandler.rfile`` can prefetch the
@@ -156,7 +191,9 @@ class EgressHandler(socketserver.StreamRequestHandler):
                     data = source.recv(65536)
                     if not data:
                         return
-                    (upstream if source is self.connection else self.connection).sendall(data)
+                    (
+                        upstream if source is self.connection else self.connection
+                    ).sendall(data)
 
 
 class ThreadedProxy(socketserver.ThreadingMixIn, socketserver.TCPServer):

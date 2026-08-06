@@ -146,14 +146,9 @@ Bottom line in accent colour: **`FLAG: <verified value>` — only after evidence
 
 Visual: a very simple three-column icon layout ending in a small audit-log/checkmark icon.
 
-## Speaker notes
-
-Generate concise speaker notes for each slide (about 35–55 spoken words). Keep them factual, aligned with `SUBMISSION_WRITEUP.md`, and suitable for a short judged demo. In particular, say that the project supports authorised challenges and that the ModelHub prompt is handled through a declared-target policy; do not assert that a live service was exploited unless external evidence is supplied.
-
 ## Output constraints
 
-- Exactly 8 slides.
 - Minimal text and no dense paragraphs.
-- One architecture diagram (Slide 4) and one security-boundary diagram (Slide 5).
+- One architecture diagram and one security-boundary diagram.
 - No citations slide and no appendix.
 - The result should look presentation-ready without needing manual cleanup.
