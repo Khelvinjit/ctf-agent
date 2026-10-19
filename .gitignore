@@ -8,4 +8,8 @@ logs/*
 !logs/.gitkeep
 ctf_agent/skills/index.sqlite
 ctf_agent/skills/vendor/
-.DS_STORE
+.DS_Store
+# curl / scratch output
+cookies.txt
+headers.txt
+body.html
