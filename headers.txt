@@ -1,8 +1,0 @@
-HTTP/1.1 200 OK
-Content-Type: text/html
-Cache-Control: no-store
-Date: Thu, 06 Aug 2026 03:55:07 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-Transfer-Encoding: chunked
-
